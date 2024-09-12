@@ -1,0 +1,133 @@
+name: Deploy Service/Web App
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Name of service/web app'
+        required: false
+        type: string
+      kube_context:
+        required: true
+        type: string
+    secrets:
+      kube_config:
+        required: true
+
+env:
+  SERVICE_NAME: ${{ inputs.service_name || github.event.repository.name  }}
+
+jobs:
+
+  define:
+    runs-on: ubuntu-latest
+
+    outputs:
+      namespace: ${{ steps.namespace.outputs.value }}
+      composeFile: ${{ steps.composeFile.outputs.value }}
+      runner: ${{ steps.runner.outputs.value }}
+
+    steps:
+      - id: namespace
+        run: |
+          if ${{endsWith(github.event.ref, 'prod')}}
+          then
+            echo "value=production" >> $GITHUB_OUTPUT
+            echo "::notice title=namespace::production"
+          elif ${{endsWith(github.event.ref, 'demo')}}
+          then
+            echo "value=demo" >> $GITHUB_OUTPUT
+            echo "::notice title=namespace::demo"
+          elif ${{endsWith(github.event.ref, 'staging')}}
+          then
+            echo "value=staging" >> $GITHUB_OUTPUT
+            echo "::notice title=namespace::staging"
+          elif ${{endsWith(github.event.ref, 'kubernetes')}}
+          then
+            echo "value=kubernetes" >> $GITHUB_OUTPUT
+            echo "::notice title=namespace::kubernetes"
+          else
+            echo "value=development" >> $GITHUB_OUTPUT
+            echo "::notice title=namespace::development"
+          fi
+      - id: composeFile
+        run: |
+          if ${{ inputs.compose_file == ''}} && ${{endsWith(github.event.ref, 'prod')}}
+          then
+            echo "value=values-prod" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::values-prod"
+          elif ${{ inputs.compose_file == ''}} && ${{endsWith(github.event.ref, 'dev')}}
+          then
+            echo "value=values-dev" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::values-dev"
+          elif ${{ inputs.compose_file == ''}} && ${{endsWith(github.event.ref, 'demo')}}
+          then
+            echo "value=values-demo" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::values-demo"
+          elif ${{ inputs.compose_file == ''}} && ${{endsWith(github.event.ref, 'staging')}}
+          then
+            echo "value=values-staging" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::values-staging"
+          elif ${{ inputs.compose_file == ''}} && ${{endsWith(github.event.ref, 'kubernetes')}}
+          then
+            echo "value=values" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::values"
+          else
+            # echo "value=${{ inputs.compose_file }}" >> $GITHUB_OUTPUT
+            # echo "::notice title=composeFile::${{ inputs.compose_file }}"
+            echo "value=stack" >> $GITHUB_OUTPUT
+            echo "::notice title=composeFile::stack"
+          fi
+      - id: runner
+        run: |
+          if ${{startsWith(inputs.docker_context, 'PM')}}
+          then
+            echo "value=fit-runner-1" >> $GITHUB_OUTPUT
+            echo "::notice title=runner::fit-runner-1"
+          elif ${{startsWith(inputs.docker_context, 'DMS')}}
+          then
+            echo "value=dms-runner-1" >> $GITHUB_OUTPUT
+            echo "::notice title=runner::dms-runner-1"
+          fi
+      - name: Check Branch
+        run : echo "::notice title=branch::${{ github.event.base_ref }}"
+
+  metadata:
+    runs-on: ubuntu-latest 
+
+    outputs:
+      imageTag: ${{ steps.meta.outputs.tags }}
+      releaseTag: ${{ steps.release_tag.outputs.release }}
+
+    steps:
+      - name: Docker Meta
+        id: meta
+        run: echo "tags=docker_hub_username/${{ env.SERVICE_NAME }}:${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
+      
+      - name: Get release Tag
+        id: release_tag
+        run: echo "release=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
+
+      - name: Notice Meta
+        run: echo "::notice title=meta tag created::${{ steps.meta.outputs.tags }}"
+
+  swarm-deploy:
+    needs: [metadata, define]
+    runs-on: [self-hosted]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Helm deploy
+        uses: tale/kubectl-action@v1
+        with:
+          base64-kube-config: ${{ secrets.kube_config }}
+      - run: |
+            kubectl config use-context ${{ inputs.kube_context }}
+            kubectl get ns
+            ls
+      - name: Install release
+        uses: hiberbee/github-action-helm@latest
+        with:
+          run: ls
+          helm: upgrade ${{ env.SERVICE_NAME }} --install Charts/${{ env.SERVICE_NAME }} -f ${{ needs.define.outputs.composeFile }}.yaml -n ${{ needs.define.outputs.namespace }} --create-namespace --set image.tag=${{ needs.metadata.outputs.releaseTag }}
